@@ -102,6 +102,41 @@ func (es *ElasticsearchService) QueryData() (string, error) {
 	return b.String(), nil
 }
 
+func (es *ElasticsearchService) QueryDataWithCustomQuery(queryString string) (string, error) {
+
+	res, err := es.client.Search(
+		es.client.Search.WithContext(context.Background()),
+		es.client.Search.WithIndex("jaeger-span-2024-07-23"),
+		es.client.Search.WithBody(strings.NewReader(queryString)),
+		es.client.Search.WithTrackTotalHits(true),
+		es.client.Search.WithPretty(),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		var e map[string]interface{}
+		if err := json.NewDecoder(res.Body).Decode(&e); err != nil {
+			return "", fmt.Errorf("error parsing the response body: %s", err)
+		} else {
+			return "", fmt.Errorf("[%s] %s: %s",
+				res.Status(),
+				e["error"].(map[string]interface{})["type"],
+				e["error"].(map[string]interface{})["reason"],
+			)
+		}
+	}
+
+	var b strings.Builder
+	if _, err := io.Copy(&b, res.Body); err != nil {
+		return "", err
+	}
+
+	return b.String(), nil
+}
+
 func ProcessCountData(data, bankID string) map[string]map[string]int {
 	countData := make(map[string]map[string]int)
 
@@ -144,6 +179,82 @@ func ProcessCountData(data, bankID string) map[string]map[string]int {
 	})
 
 	return countData
+}
+
+type PercentileValues struct {
+	P50 float64 `json:"p50"`
+	P75 float64 `json:"p75"`
+	P90 float64 `json:"p90"`
+	P95 float64 `json:"p95"`
+	P99 float64 `json:"p99"`
+}
+
+type OperationPercentiles struct {
+	OperationName    string           `json:"operationName"`
+	TransactionCount int              `json:"transactionCount"`
+	Percentiles      PercentileValues `json:"percentiles"`
+}
+
+func ProcessPercentilesTransactions(data string) []OperationPercentiles {
+
+	var response map[string]interface{}
+
+	if err := json.Unmarshal([]byte(data), &response); err != nil {
+		return nil
+	}
+
+	var results []OperationPercentiles
+
+	totalTransactions := int(response["hits"].(map[string]interface{})["total"].(map[string]interface{})["value"].(float64))
+
+	buckets := response["aggregations"].(map[string]interface{})["by_operation"].(map[string]interface{})["buckets"].([]interface{})
+	for _, item := range buckets {
+		bucket := item.(map[string]interface{})
+		values := bucket["load_time_percentiles"].(map[string]interface{})["values"].(map[string]interface{})
+
+		op := OperationPercentiles{
+			OperationName:    bucket["key"].(string),
+			TransactionCount: totalTransactions,
+			Percentiles: PercentileValues{
+				P50: values["50.0"].(float64) / 1000,
+				P75: values["75.0"].(float64) / 1000,
+				P90: values["90.0"].(float64) / 1000,
+				P95: values["95.0"].(float64) / 1000,
+				P99: values["99.0"].(float64) / 1000,
+			},
+		}
+		results = append(results, op)
+	}
+
+	return results
+}
+
+func ProcessTransactionsData(data string) map[string][]map[string]interface{} {
+	resultMap := make(map[string][]map[string]interface{})
+
+	endpoints := gjson.Get(data, "aggregations.by_endpoint.buckets")
+	endpoints.ForEach(func(_, bucket gjson.Result) bool {
+		endpointName := bucket.Get("key").String()
+		transactions := bucket.Get("top_slow_transactions.hits.hits").Array()
+
+		var transactionsList []map[string]interface{}
+
+		for _, transaction := range transactions {
+			operationName := transaction.Get("_source.operationName").String()
+			duration := transaction.Get("_source.duration").Int()
+
+			transactionMap := map[string]interface{}{
+				"operationName": operationName,
+				"duration":      fmt.Sprintf("%.2fms", float64(duration)/1000.0),
+			}
+			transactionsList = append(transactionsList, transactionMap)
+		}
+
+		resultMap[endpointName] = transactionsList
+		return true // continue iterating
+	})
+
+	return resultMap
 }
 
 func CountTransactionsBetweenBanks(data, bankID1, bankID2 string) int {

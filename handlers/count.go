@@ -78,3 +78,114 @@ func GetTransactionsByDate(esService *services.ElasticsearchService) fiber.Handl
 		})
 	}
 }
+
+func GetPercentilesTransactions(es *services.ElasticsearchService) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+
+		query := `{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [
+        {"terms": {
+						"operationName": [
+							"POST /api/v1/transactions/fee",
+							"POST /api/v1/transactions/deposit",
+							"POST /api/v1/transactions/transfer",
+							"POST /api/v1/transactions/withdraw",
+							"POST /api/v1/transactions/refund",
+							"POST /api/v1/transactions/payment"
+						]
+					}}
+      ]
+    }
+  },
+  "aggs": {
+    "by_operation": {
+      "terms": {
+        "field": "operationName",
+        "size": 10
+      },
+      "aggs": {
+        "load_time_percentiles": {
+          "percentiles": {
+            "field": "duration",
+            "percents": [50, 75, 90, 95, 99]
+          }
+        }
+      }
+    }
+  }
+}
+`
+		data, err := es.QueryDataWithCustomQuery(query)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve data"})
+		}
+
+		percentiles := services.ProcessPercentilesTransactions(data)
+		return c.JSON(fiber.Map{
+			"percentiles(ms)": percentiles,
+		})
+	}
+}
+
+func GetSlowestTransactions(esService *services.ElasticsearchService) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+
+		query := `{
+			"size": 0,
+			"query": {
+				"bool": {
+					"must": [
+						{"terms": {
+							"operationName": [
+								"POST /api/v1/transactions/fee",
+								"POST /api/v1/transactions/deposit",
+								"POST /api/v1/transactions/transfer",
+								"POST /api/v1/transactions/withdraw",
+								"POST /api/v1/transactions/refund",
+								"POST /api/v1/transactions/payment"
+							]
+						}}
+					]
+				}
+			},
+			"aggs": {
+				"by_endpoint": {
+					"terms": {
+						"field": "operationName",
+						"size": 10
+					},
+					"aggs": {
+						"top_slow_transactions": {
+							"top_hits": {
+								"sort": [
+									{
+										"duration": {
+											"order": "desc"
+										}
+									}
+								],
+								"_source": {
+									"includes": ["operationName", "duration", "tags.http.response.body", "tags.http.request.body"]
+								},
+								"size": 5
+							}
+						}
+					}
+				}
+			}
+		}`
+
+		data, err := esService.QueryDataWithCustomQuery(query)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to retrieve data"})
+		}
+
+		slowestTransactions := services.ProcessTransactionsData(data)
+		return c.JSON(fiber.Map{
+			"slowestTransactions": slowestTransactions,
+		})
+	}
+}

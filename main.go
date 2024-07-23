@@ -22,6 +22,8 @@ func main() {
 	app.Get("/transactions/from/:bankID1/to/:bankID2", handlers.GetTransactionsBetweenBanks(esService))
 	app.Get("/bank/:bankID/transactions/date/count", handlers.GetTransactionsByDate(esService))
 	app.Get("/bank/:bankID/transactions/exception", handlers.GetException(esService))
+	app.Get("transactions/slowest", handlers.GetSlowestTransactions(esService))
+	app.Get("transactions/percentiles", handlers.GetPercentilesTransactions(esService))
 
 	log.Fatal(app.Listen(":3000"))
 }
